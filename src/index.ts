@@ -3,6 +3,269 @@ import * as admin from 'firebase-admin';
 
 admin.initializeApp();
 
+// ── importUsers ───────────────────────────────────────────────────────────────
+
+const PHONE_REGEX_CF = /^\d{10}$/;
+const IMPORT_MAX_ROWS = 500;
+const IMPORT_AUTH_CHUNK = 100; // auth.getUsers() limit
+const IMPORT_CONCURRENCY = 10; // parallel createUser calls
+
+function parseCsvContent(content: string): string[][] {
+  return content
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .map(line =>
+      line.split(',').map(cell => {
+        const trimmed = cell.trim();
+        return trimmed.startsWith('"') && trimmed.endsWith('"')
+          ? trimmed.slice(1, -1).trim()
+          : trimmed;
+      })
+    );
+}
+
+type ImportRow = {
+  rowNum:      number;
+  phone:       string;
+  levelId:     string;
+  parentId:    string | null;
+  cityId:      string | null;
+  communityId: string | null;
+  routeId:     string | null;
+};
+
+type ImportError = { row: number; phone: string; reason: string };
+
+export const importUsers = onRequest(
+  { cors: true, timeoutSeconds: 540 },
+  async (req, res) => {
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method Not Allowed' });
+      return;
+    }
+
+    // ── Auth ────────────────────────────────────────────────────────────────
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    try {
+      const idToken      = authHeader.split('Bearer ')[1];
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      const userDoc      = await admin.firestore().collection('SystemUsers').doc(decodedToken.uid).get();
+
+      if (!userDoc.exists || userDoc.data()?.backofficeRole !== 'admin') {
+        res.status(403).json({ error: 'Forbidden: Admin required' });
+        return;
+      }
+    } catch {
+      res.status(401).json({ error: 'Invalid token' });
+      return;
+    }
+
+    const { csvContent } = req.body as { csvContent?: string };
+    if (!csvContent?.trim()) {
+      res.status(400).json({ error: 'Missing csvContent' });
+      return;
+    }
+
+    // ── Parse CSV ───────────────────────────────────────────────────────────
+    const rows = parseCsvContent(csvContent);
+    if (rows.length < 2) {
+      res.status(400).json({ error: 'El CSV no contiene filas de datos.' });
+      return;
+    }
+
+    const header      = rows[0].map(h => h.toLowerCase());
+    const phoneIdx    = header.indexOf('phone');
+    const levelIdIdx  = header.indexOf('levelid');
+    const parentIdIdx = header.indexOf('parentid');
+    const cityIdIdx   = header.indexOf('cityid');
+    const commIdx     = header.indexOf('communityid');
+    const routeIdx    = header.indexOf('routeid');
+
+    if (phoneIdx === -1 || levelIdIdx === -1) {
+      res.status(400).json({ error: 'El CSV debe tener columnas: phone, levelId' });
+      return;
+    }
+
+    const dataRows = rows.slice(1);
+    if (dataRows.length > IMPORT_MAX_ROWS) {
+      res.status(400).json({ error: `Máximo ${IMPORT_MAX_ROWS} filas por importación.` });
+      return;
+    }
+
+    // ── Validar formato ─────────────────────────────────────────────────────
+    const parseErrors: ImportError[] = [];
+    const parsed: ImportRow[]        = [];
+    const phoneSeen = new Set<string>();
+
+    for (let i = 0; i < dataRows.length; i++) {
+      const cols   = dataRows[i];
+      const rowNum = i + 2;
+      const phone  = (cols[phoneIdx] ?? '').replace(/\D/g, '');
+      const levelId = cols[levelIdIdx] ?? '';
+
+      if (!PHONE_REGEX_CF.test(phone)) {
+        parseErrors.push({ row: rowNum, phone, reason: 'Teléfono inválido (debe tener 10 dígitos)' });
+        continue;
+      }
+      if (!levelId) {
+        parseErrors.push({ row: rowNum, phone, reason: 'levelId es obligatorio' });
+        continue;
+      }
+      if (phoneSeen.has(phone)) {
+        parseErrors.push({ row: rowNum, phone, reason: 'Teléfono duplicado en el CSV' });
+        continue;
+      }
+      phoneSeen.add(phone);
+
+      parsed.push({
+        rowNum,
+        phone,
+        levelId,
+        parentId:    parentIdIdx !== -1 ? (cols[parentIdIdx] || null)  : null,
+        cityId:      cityIdIdx   !== -1 ? (cols[cityIdIdx]   || null)  : null,
+        communityId: commIdx     !== -1 ? (cols[commIdx]     || null)  : null,
+        routeId:     routeIdx    !== -1 ? (cols[routeIdx]    || null)  : null,
+      });
+    }
+
+    // ── Verificar existencia en Firebase Auth ───────────────────────────────
+    const existingErrors: ImportError[] = [];
+    const newRows: ImportRow[]          = [];
+
+    for (let i = 0; i < parsed.length; i += IMPORT_AUTH_CHUNK) {
+      const chunkRows = parsed.slice(i, i + IMPORT_AUTH_CHUNK);
+      const identifiers = chunkRows.map(r => ({ email: `${r.phone}@deliveryaid.app` }));
+      const result      = await admin.auth().getUsers(identifiers);
+      const existingSet = new Set(result.users.map(u => u.email ?? ''));
+
+      for (const row of chunkRows) {
+        if (existingSet.has(`${row.phone}@deliveryaid.app`)) {
+          existingErrors.push({ row: row.rowNum, phone: row.phone, reason: 'Ya existe una cuenta con este teléfono' });
+        } else {
+          newRows.push(row);
+        }
+      }
+    }
+
+    // ── Pre-cargar paths de padres ──────────────────────────────────────────
+    const uniqueParentIds = [...new Set(newRows.map(r => r.parentId).filter(Boolean) as string[])];
+    const parentPathMap   = new Map<string, string[]>();
+
+    if (uniqueParentIds.length > 0) {
+      const snaps = await Promise.all(
+        uniqueParentIds.map(id => admin.firestore().collection('OrgMembers').doc(id).get())
+      );
+      snaps.forEach((snap, idx) => {
+        if (snap.exists) {
+          parentPathMap.set(uniqueParentIds[idx], (snap.data()?.path as string[]) ?? []);
+        }
+      });
+    }
+
+    // ── Crear cuentas en Firebase Auth ──────────────────────────────────────
+    const createErrors: ImportError[] = [];
+    const created: { row: ImportRow; uid: string }[] = [];
+
+    for (let i = 0; i < newRows.length; i += IMPORT_CONCURRENCY) {
+      const slice   = newRows.slice(i, i + IMPORT_CONCURRENCY);
+      const results = await Promise.allSettled(
+        slice.map(row =>
+          admin.auth().createUser({
+            email:       `${row.phone}@deliveryaid.app`,
+            password:    row.phone.slice(-6),
+            displayName: row.phone,
+          }).then(u => ({ row, uid: u.uid }))
+        )
+      );
+      results.forEach((r, idx) => {
+        if (r.status === 'fulfilled') {
+          created.push(r.value);
+        } else {
+          const row = slice[idx];
+          createErrors.push({
+            row:    row.rowNum,
+            phone:  row.phone,
+            reason: (r.reason as Error)?.message ?? 'Error al crear cuenta en Auth',
+          });
+        }
+      });
+    }
+
+    // ── Escritura en Firestore ──────────────────────────────────────────────
+    const db            = admin.firestore();
+    const SAFE_OPS      = 498; // 2 ops per user, keep under 500
+    let batch           = db.batch();
+    let opsInBatch      = 0;
+
+    for (const { row, uid } of created) {
+      if (opsInBatch + 2 > SAFE_OPS) {
+        await batch.commit();
+        batch      = db.batch();
+        opsInBatch = 0;
+      }
+
+      const memberRef  = db.collection('OrgMembers').doc();
+      const parentPath = row.parentId ? (parentPathMap.get(row.parentId) ?? []) : [];
+      const path       = [...parentPath, memberRef.id];
+
+      batch.set(memberRef, {
+        name:       '',
+        phone:      row.phone,
+        curp:       '',
+        birthDate:  '',
+        levelId:    row.levelId,
+        parentId:   row.parentId   ?? null,
+        path,
+        assignment: {
+          cityId:      row.cityId      ?? null,
+          communityId: row.communityId ?? null,
+          routeId:     row.routeId     ?? null,
+        },
+        appUserId: uid,
+        active:    true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      batch.set(db.collection('SystemUsers').doc(uid), {
+        phone:              row.phone,
+        name:               '',
+        type:               'app',
+        backofficeRole:     null,
+        orgMemberId:        memberRef.id,
+        active:             true,
+        mustChangePassword: true,
+        onboardingComplete: false,
+        createdAt:          admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt:          admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      opsInBatch += 2;
+    }
+
+    if (opsInBatch > 0) {
+      await batch.commit();
+    }
+
+    // ── Respuesta ───────────────────────────────────────────────────────────
+    const allErrors = [...parseErrors, ...existingErrors, ...createErrors]
+      .sort((a, b) => a.row - b.row);
+
+    res.status(200).json({
+      total:     dataRows.length,
+      succeeded: created.length,
+      failed:    allErrors.length,
+      errors:    allErrors,
+    });
+  }
+);
+
 const FCM_CHUNK_SIZE = 500;
 const FIRESTORE_IN_LIMIT = 30;
 const FIRESTORE_BATCH_LIMIT = 500;
