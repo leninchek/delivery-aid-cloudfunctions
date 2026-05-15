@@ -526,3 +526,163 @@ export const sendPushCampaign = onRequest(
     }
   }
 );
+
+// ── Shared auth helper ────────────────────────────────────────────────────────
+
+async function verifyAdmin(req: { headers: { authorization?: string } }): Promise<string> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) throw Object.assign(new Error('Unauthorized'), { status: 401 });
+
+  const idToken = authHeader.split('Bearer ')[1];
+  const decoded = await admin.auth().verifyIdToken(idToken);
+
+  const userDoc = await admin.firestore().collection('SystemUsers').doc(decoded.uid).get();
+  if (!userDoc.exists || userDoc.data()?.backofficeRole !== 'admin') {
+    throw Object.assign(new Error('Forbidden: Admin required'), { status: 403 });
+  }
+  return decoded.uid;
+}
+
+// ── createAppUser ─────────────────────────────────────────────────────────────
+
+export const createAppUser = onRequest(
+  { cors: true },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
+
+    try {
+      await verifyAdmin(req);
+
+      const { phone, levelId, parentId, cityId, communityId, routeId } = req.body as {
+        phone: string; levelId: string;
+        parentId?: string | null; cityId?: string | null;
+        communityId?: string | null; routeId?: string | null;
+      };
+
+      if (!PHONE_REGEX_CF.test(phone)) {
+        res.status(400).json({ error: 'El teléfono debe tener exactamente 10 dígitos.' }); return;
+      }
+      if (!levelId?.trim()) {
+        res.status(400).json({ error: 'El nivel organizacional es obligatorio.' }); return;
+      }
+
+      const email = `${phone}@deliveryaid.app`;
+      const tempPassword = phone.slice(-6);
+
+      try {
+        await admin.auth().getUserByEmail(email);
+        res.status(409).json({ error: 'Ya existe una cuenta con ese número de teléfono.' }); return;
+      } catch (lookupErr: unknown) {
+        if ((lookupErr as { code?: string }).code !== 'auth/user-not-found') throw lookupErr;
+      }
+
+      const authUser = await admin.auth().createUser({ email, password: tempPassword, displayName: phone });
+      const uid = authUser.uid;
+
+      const memberRef = admin.firestore().collection('OrgMembers').doc();
+      let path: string[] = [memberRef.id];
+      if (parentId) {
+        const parentSnap = await admin.firestore().collection('OrgMembers').doc(parentId).get();
+        const parentPath = (parentSnap.data()?.path as string[] | undefined) ?? [];
+        path = [...parentPath, memberRef.id];
+      }
+
+      const batch = admin.firestore().batch();
+      batch.set(memberRef, {
+        name: '', phone, curp: '', birthDate: '', levelId,
+        parentId: parentId ?? null, path,
+        assignment: { cityId: cityId ?? null, communityId: communityId ?? null, routeId: routeId ?? null },
+        appUserId: uid, active: true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      batch.set(admin.firestore().collection('SystemUsers').doc(uid), {
+        phone, name: '', type: 'app', backofficeRole: null,
+        orgMemberId: memberRef.id, active: true,
+        mustChangePassword: true, onboardingComplete: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      await batch.commit();
+
+      res.status(201).json({ uid, phone, tempPassword });
+
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status ?? 500;
+      const message = err instanceof Error ? err.message : 'Error interno al crear el usuario.';
+      console.error('[createAppUser]', err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
+
+// ── resetAppUserPassword ──────────────────────────────────────────────────────
+
+const RESET_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function generateTempPassword(): string {
+  let result = '';
+  for (let i = 0; i < 8; i++) result += RESET_CHARS[Math.floor(Math.random() * RESET_CHARS.length)];
+  return result;
+}
+
+export const resetAppUserPassword = onRequest(
+  { cors: true },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
+
+    try {
+      await verifyAdmin(req);
+
+      const { uid } = req.body as { uid: string };
+      if (!uid?.trim()) { res.status(400).json({ error: 'El uid es obligatorio.' }); return; }
+
+      const tempPassword = generateTempPassword();
+      await admin.auth().updateUser(uid, { password: tempPassword });
+      await admin.firestore().collection('SystemUsers').doc(uid).update({
+        mustChangePassword: true,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      res.status(200).json({ tempPassword });
+
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status ?? 500;
+      const message = err instanceof Error ? err.message : 'Error interno al restablecer la contraseña.';
+      console.error('[resetAppUserPassword]', err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
+
+// ── toggleAppUserStatus ───────────────────────────────────────────────────────
+
+export const toggleAppUserStatus = onRequest(
+  { cors: true },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
+
+    try {
+      await verifyAdmin(req);
+
+      const { uid, active } = req.body as { uid: string; active: boolean };
+      if (!uid?.trim()) { res.status(400).json({ error: 'El uid es obligatorio.' }); return; }
+      if (typeof active !== 'boolean') { res.status(400).json({ error: 'El campo active debe ser un booleano.' }); return; }
+
+      await Promise.all([
+        admin.auth().updateUser(uid, { disabled: !active }),
+        admin.firestore().collection('SystemUsers').doc(uid).update({
+          active,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }),
+      ]);
+
+      res.status(200).json({ ok: true });
+
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status ?? 500;
+      const message = err instanceof Error ? err.message : 'Error interno al cambiar el estado.';
+      console.error('[toggleAppUserStatus]', err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
