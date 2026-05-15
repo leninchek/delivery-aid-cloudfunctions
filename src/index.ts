@@ -384,9 +384,9 @@ export const sendPushCampaign = onRequest(
         return;
       }
 
-      const { campaignId: cid, title, body, target, targetLevelIds } = req.body;
+      const { campaignId: cid, title, body, target, targetLevelIds, screen, entityId } = req.body;
       campaignId = cid;
-      console.log('[sendPushCampaign] Payload:', { campaignId, title, body, target, targetLevelIds });
+      console.log('[sendPushCampaign] Payload:', { campaignId, title, body, target, targetLevelIds, screen, entityId });
 
       if (!campaignId || !title || !body || !target) {
         res.status(400).json({ error: 'Missing required fields: campaignId, title, body, target' });
@@ -405,11 +405,28 @@ export const sendPushCampaign = onRequest(
         }
       }
 
-      // Mark campaign as in-progress before dispatching so a timeout is distinguishable
-      await admin.firestore().collection('PushCampaigns').doc(campaignId).update({
-        status: 'sending',
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      // Idempotency check + mark as in-progress in a single transaction.
+      // If the campaign was already processed (or is being processed by a concurrent
+      // invocation), bail out immediately to prevent double-sending.
+      const TERMINAL_STATUSES = new Set(['sending', 'sent', 'partial_failed', 'failed']);
+      const campaignRef = admin.firestore().collection('PushCampaigns').doc(campaignId as string);
+      const alreadyProcessed = await admin.firestore().runTransaction(async (tx) => {
+        const snap = await tx.get(campaignRef);
+        const currentStatus = snap.data()?.status as string | undefined;
+        if (currentStatus && TERMINAL_STATUSES.has(currentStatus)) {
+          return true;
+        }
+        tx.update(campaignRef, {
+          status: 'sending',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return false;
       });
+      if (alreadyProcessed) {
+        console.warn('[sendPushCampaign] Campaign already processed or in-flight, skipping:', campaignId);
+        res.status(200).json({ message: 'already_processed' });
+        return;
+      }
 
       const tokens = await queryTokens(target as string, (targetLevelIds as string[]) ?? []);
       console.log('[sendPushCampaign] Tokens to send:', tokens.length);
@@ -427,14 +444,16 @@ export const sendPushCampaign = onRequest(
       }
 
       const baseMessage = {
-        notification: { title: title as string, body: body as string },
         android: {
-          notification: {
-            channelId: 'delivery_aid_notifications',
-            priority: 'high' as const,
-          },
+          priority: 'high' as const,
         },
-        data: { campaignId: campaignId as string },
+        data: {
+          campaignId: campaignId as string,
+          title: title as string,
+          body: body as string,
+          screen: (screen as string) || '',
+          entityId: (entityId as string) || '',
+        },
       };
 
       // Send in batches of 500 (FCM sendEachForMulticast limit)
