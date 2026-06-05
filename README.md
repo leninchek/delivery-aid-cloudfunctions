@@ -205,12 +205,18 @@ firebase deploy -P qa --only functions
 
 ### Ambientes Firebase
 
-| Alias | Proyecto Firebase | Uso |
+| Alias | Proyecto Firebase | URL base de funciones |
 |---|---|---|
-| `default` / `production` | `delivery-aid` | Producción |
-| `qa` | `delivery-aid-qa` | Pruebas / desarrollo |
+| `default` / `production` | `delivery-aid` | `https://us-central1-delivery-aid.cloudfunctions.net` |
+| `qa` | `delivery-aid-qa` | `https://us-central1-delivery-aid-qa.cloudfunctions.net` |
 
 La configuración de ambientes está en `.firebaserc` en la raíz del workspace.
+
+> Las funciones v2 también son accesibles vía Cloud Run URL (formato `https://<fn>-<hash>-uc.a.run.app`). Ambas URLs funcionan para la misma función.
+
+### Cleanup policy
+
+Configurada en ambos proyectos — imágenes de contenedor antiguas (>1 día) se eliminan automáticamente para evitar acumulación de costos de Storage.
 
 ### Ver logs en producción
 
