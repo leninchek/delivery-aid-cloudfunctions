@@ -38,7 +38,7 @@ type ImportRow = {
 type ImportError = { row: number; phone: string; reason: string };
 
 export const importUsers = onRequest(
-  { cors: true, timeoutSeconds: 540 },
+  { cors: ['https://cuentaconmigo.chemachacon.com.mx'], timeoutSeconds: 540 },
   async (req, res) => {
     if (req.method !== 'POST') {
       res.status(405).json({ error: 'Method Not Allowed' });
@@ -351,10 +351,8 @@ async function queryTokens(target: string, targetLevelIds: string[]): Promise<st
   return Array.from(seenTokens);
 }
 
-// TODO: reemplazar true por el dominio del backoffice una vez que esté desplegado
-// Ejemplo: { cors: ['https://backoffice.tudominio.com'] }
 export const sendPushCampaign = onRequest(
-  { cors: true },
+  { cors: ['https://cuentaconmigo.chemachacon.com.mx'] },
   async (req, res) => {
     if (req.method !== 'POST') {
       res.status(405).json({ error: 'Method Not Allowed' });
@@ -546,7 +544,7 @@ async function verifyAdmin(req: { headers: { authorization?: string } }): Promis
 // ── createAppUser ─────────────────────────────────────────────────────────────
 
 export const createAppUser = onRequest(
-  { cors: true },
+  { cors: ['https://cuentaconmigo.chemachacon.com.mx'] },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 
@@ -626,7 +624,7 @@ function generateTempPassword(): string {
 }
 
 export const resetAppUserPassword = onRequest(
-  { cors: true },
+  { cors: ['https://cuentaconmigo.chemachacon.com.mx'] },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 
@@ -657,7 +655,7 @@ export const resetAppUserPassword = onRequest(
 // ── toggleAppUserStatus ───────────────────────────────────────────────────────
 
 export const toggleAppUserStatus = onRequest(
-  { cors: true },
+  { cors: ['https://cuentaconmigo.chemachacon.com.mx'] },
   async (req, res) => {
     if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 

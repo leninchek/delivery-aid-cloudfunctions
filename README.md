@@ -193,11 +193,24 @@ npm run serve
 # Levanta el emulador de Cloud Functions en localhost
 ```
 
-### Despliegue a producción
+### Despliegue
 
 ```bash
+# Desplegar a producción (por defecto)
 firebase deploy --only functions
+
+# Desplegar a QA
+firebase deploy -P qa --only functions
 ```
+
+### Ambientes Firebase
+
+| Alias | Proyecto Firebase | Uso |
+|---|---|---|
+| `default` / `production` | `delivery-aid` | Producción |
+| `qa` | `delivery-aid-qa` | Pruebas / desarrollo |
+
+La configuración de ambientes está en `.firebaserc` en la raíz del workspace.
 
 ### Ver logs en producción
 
