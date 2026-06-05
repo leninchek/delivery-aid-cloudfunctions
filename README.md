@@ -222,10 +222,9 @@ npm run logs
 
 ## Notas de seguridad
 
-- El CORS está habilitado con `cors: true`. En producción se recomienda restringirlo al dominio del Back Office:
-  ```typescript
-  { cors: ['https://tu-backoffice.com'] }
-  ```
-  Ver comentario en `src/index.ts` junto a `sendPushCampaign`.
+- El CORS está restringido a los dominios autorizados en las 5 funciones:
+  - `https://cuentaconmigo.chemachacon.com.mx` (producción)
+  - `https://delivery-aid-qa.web.app` (QA)
+  - `https://delivery-aid-qa.firebaseapp.com` (QA alternativo)
 - Las funciones nunca exponen credenciales de Firebase Admin al cliente.
 - La contraseña temporal de nuevos usuarios App se entrega solo al admin que la solicita y no se guarda en texto claro en Firestore.
