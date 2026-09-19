@@ -684,3 +684,118 @@ export const toggleAppUserStatus = onRequest(
     }
   }
 );
+
+// ── createBackofficeUser ──────────────────────────────────────────────────────
+
+const EMAIL_REGEX_CF = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export const createBackofficeUser = onRequest(
+  { cors: ['https://cuentaconmigo.chemachacon.com.mx', 'https://delivery-aid-qa.web.app', 'https://delivery-aid-qa.firebaseapp.com', 'http://localhost:3000'] },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
+
+    try {
+      await verifyAdmin(req);
+
+      const { email, password, name, roleId } = req.body as {
+        email: string; password: string; name: string; roleId: string;
+      };
+
+      if (!EMAIL_REGEX_CF.test(email)) { res.status(400).json({ error: 'El correo no tiene un formato válido.' }); return; }
+      if (!password || password.length < 6) { res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' }); return; }
+      if (!name?.trim()) { res.status(400).json({ error: 'El nombre es obligatorio.' }); return; }
+      if (!roleId?.trim()) { res.status(400).json({ error: 'El rol es obligatorio.' }); return; }
+
+      const db = admin.firestore();
+
+      // Verify role exists (except admin, which is bootstrapped)
+      if (roleId !== 'admin') {
+        const roleSnap = await db.collection('BackofficeRoles').doc(roleId).get();
+        if (!roleSnap.exists) { res.status(400).json({ error: `El rol "${roleId}" no existe.` }); return; }
+      }
+
+      // Check for duplicate email
+      try {
+        await admin.auth().getUserByEmail(email);
+        res.status(409).json({ error: 'Ya existe una cuenta con ese correo.' }); return;
+      } catch (lookupErr: unknown) {
+        if ((lookupErr as { code?: string }).code !== 'auth/user-not-found') throw lookupErr;
+      }
+
+      const authUser = await admin.auth().createUser({ email, password, displayName: name.trim() });
+      const uid = authUser.uid;
+
+      await db.collection('SystemUsers').doc(uid).set({
+        email:          email.toLowerCase(),
+        name:           name.trim(),
+        type:           'backoffice',
+        backofficeRole: roleId,
+        active:         true,
+        createdAt:      admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      res.status(201).json({ uid, email });
+
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status ?? 500;
+      const message = err instanceof Error ? err.message : 'Error interno al crear el usuario.';
+      console.error('[createBackofficeUser]', err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
+
+// ── updateBackofficeUser ──────────────────────────────────────────────────────
+
+export const updateBackofficeUser = onRequest(
+  { cors: ['https://cuentaconmigo.chemachacon.com.mx', 'https://delivery-aid-qa.web.app', 'https://delivery-aid-qa.firebaseapp.com', 'http://localhost:3000'] },
+  async (req, res) => {
+    if (req.method !== 'POST' && req.method !== 'PATCH') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
+
+    try {
+      await verifyAdmin(req);
+
+      const { uid, name, roleId, active } = req.body as {
+        uid: string; name?: string; roleId?: string; active?: boolean;
+      };
+
+      if (!uid?.trim()) { res.status(400).json({ error: 'El UID es obligatorio.' }); return; }
+
+      const db = admin.firestore();
+      const userSnap = await db.collection('SystemUsers').doc(uid).get();
+      if (!userSnap.exists) { res.status(404).json({ error: 'El usuario no existe.' }); return; }
+      if (userSnap.data()?.type !== 'backoffice') {
+        res.status(400).json({ error: 'Este endpoint solo actualiza usuarios Back Office.' }); return;
+      }
+      // Protect admin account from role changes
+      if (userSnap.data()?.backofficeRole === 'admin' && roleId && roleId !== 'admin') {
+        res.status(403).json({ error: 'No se puede cambiar el rol del administrador.' }); return;
+      }
+
+      const updates: Record<string, unknown> = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+      if (name !== undefined) updates.name = name.trim();
+
+      if (roleId !== undefined) {
+        if (roleId !== 'admin') {
+          const roleSnap = await db.collection('BackofficeRoles').doc(roleId).get();
+          if (!roleSnap.exists) { res.status(400).json({ error: `El rol "${roleId}" no existe.` }); return; }
+        }
+        updates.backofficeRole = roleId;
+      }
+
+      if (active !== undefined) updates.active = active;
+
+      await db.collection('SystemUsers').doc(uid).update(updates);
+
+      res.status(200).json({ ok: true });
+
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status ?? 500;
+      const message = err instanceof Error ? err.message : 'Error interno al actualizar el usuario.';
+      console.error('[updateBackofficeUser]', err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
