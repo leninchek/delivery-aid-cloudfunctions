@@ -108,6 +108,47 @@ Activa o desactiva una cuenta App.
 
 ---
 
+### `POST /createBackofficeUser`
+
+Crea una cuenta de acceso al Back Office (admin o un rol de `BackofficeRoles`).
+
+**Acceso:** Solo `admin`
+
+**Body:**
+```json
+{ "email": "usuario@ejemplo.com", "password": "min-6-caracteres", "name": "Nombre", "roleId": "capturista" }
+```
+
+**Comportamiento:**
+- Verifica que `roleId` exista en `BackofficeRoles` (excepto `"admin"`, que es fijo y no requiere documento de rol).
+- Verifica que no exista ya una cuenta de Auth con ese correo.
+- Crea el usuario en Firebase Auth y el documento `SystemUsers` con `type: "backoffice"`.
+- Retorna `{ uid, email }`.
+
+> Reemplaza a la ruta local de Next.js `/api/backoffice-users/create`, que nunca funcionó en producción/QA porque el Back Office se publica como export estático sin servidor (confirmado con 404 real).
+
+---
+
+### `POST /updateBackofficeUser`
+
+Actualiza nombre, rol o estado de una cuenta Back Office existente.
+
+**Acceso:** Solo `admin`
+
+**Body:**
+```json
+{ "uid": "<firebase_auth_uid>", "name": "Nombre opcional", "roleId": "rol opcional", "active": true }
+```
+
+**Comportamiento:**
+- Rechaza si el usuario no existe o no es `type: "backoffice"`.
+- Protege la cuenta `admin`: no permite cambiarle el rol.
+- Si se envía `roleId`, verifica que exista en `BackofficeRoles` (excepto `"admin"`).
+
+> Reemplaza a la ruta local de Next.js `/api/backoffice-users/update`, con el mismo problema que `createBackofficeUser`.
+
+---
+
 ### `POST /sendPushCampaign`
 
 Envía una campaña de notificaciones push a usuarios de la App.
@@ -158,8 +199,9 @@ El `id_token` se obtiene de Firebase Auth en el cliente (Back Office). La funci�
 
 | Colección | Operaciones |
 |---|---|
-| `SystemUsers` | Lectura (verificar admin), escritura (crear/actualizar usuarios App) |
+| `SystemUsers` | Lectura (verificar admin), escritura (crear/actualizar usuarios App y Back Office) |
 | `OrgMembers` | Lectura (resolver paths), escritura (crear miembros en importación) |
+| `BackofficeRoles` | Lectura (validar `roleId` al crear/actualizar usuarios Back Office) |
 | `AppDevices` | Lectura (obtener tokens FCM), escritura (desactivar tokens inválidos) |
 | `PushCampaigns` | Lectura + escritura (estado y estadísticas) |
 
@@ -228,9 +270,10 @@ npm run logs
 
 ## Notas de seguridad
 
-- El CORS está restringido a los dominios autorizados en las 5 funciones:
+- El CORS está restringido a los dominios autorizados en las 7 funciones:
   - `https://cuentaconmigo.chemachacon.com.mx` (producción)
   - `https://delivery-aid-qa.web.app` (QA)
   - `https://delivery-aid-qa.firebaseapp.com` (QA alternativo)
+  - `http://localhost:3000` (Back Office corriendo en local, `npm run dev`)
 - Las funciones nunca exponen credenciales de Firebase Admin al cliente.
 - La contraseña temporal de nuevos usuarios App se entrega solo al admin que la solicita y no se guarda en texto claro en Firestore.
