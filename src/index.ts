@@ -212,7 +212,7 @@ export const importUsers = onRequest(
 
       const memberRef  = db.collection('OrgMembers').doc();
       const parentPath = row.parentId ? (parentPathMap.get(row.parentId) ?? []) : [];
-      const path       = [...parentPath, memberRef.id];
+      const path       = row.parentId ? [...parentPath, row.parentId] : [];
 
       batch.set(memberRef, {
         name:       '',
@@ -578,11 +578,11 @@ export const createAppUser = onRequest(
       const uid = authUser.uid;
 
       const memberRef = admin.firestore().collection('OrgMembers').doc();
-      let path: string[] = [memberRef.id];
+      let path: string[] = [];
       if (parentId) {
         const parentSnap = await admin.firestore().collection('OrgMembers').doc(parentId).get();
         const parentPath = (parentSnap.data()?.path as string[] | undefined) ?? [];
-        path = [...parentPath, memberRef.id];
+        path = [...parentPath, parentId];
       }
 
       const batch = admin.firestore().batch();
